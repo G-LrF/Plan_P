@@ -1,0 +1,128 @@
+# ==========================================================================
+# .gitattributes —— 告诉 Git "每种文件该怎么处理"
+# ==========================================================================
+# 【为什么需要这个文件，而不是靠 core.autocrlf】
+#
+#   core.autocrlf 是"凭机器配置猜"，.gitattributes 是"写死在仓库里"。
+#   区别在于：
+#     autocrlf      只对你本机生效。队友的机器配置不一样，行为就不一样。
+#     .gitattributes 跟着仓库走。谁 clone 都用同一套规则，结果可预测。
+#
+#   我这次把 core.autocrlf 设成了 false，就是为了把换行符的控制权
+#   从"机器配置"交给"仓库规则"，也就是这个文件。
+#
+# 【换行符到底怎么回事（一句话版）】
+#   Windows 用 CRLF（\r\n），Linux/macOS 用 LF（\n）。
+#   如果两个平台混着提交同一个文件，git 会认为"整个文件都改了"，
+#   于是你只改了一行，diff 却显示几百行 —— 这叫"幽灵改动"，
+#   排查起来极其痛苦，是多人协作的经典事故。
+#   规则：统一在仓库里存 LF，各平台检出时按需转换。
+# ==========================================================================
+
+# ---------------------------------------------------------------------------
+# 默认规则：由 Git 自动识别文本文件，仓库内统一使用 LF
+# ---------------------------------------------------------------------------
+* text=auto eol=lf
+
+# 【这句到底做了什么】
+#   text=auto —— 让 Git 自己判断"这是不是文本文件"（靠内容判断，不看扩展名）
+#   eol=lf    —— 如果是文本文件，在【工作区检出时】也用 LF，不做转换
+#
+# 【为什么不用 eol=crlf】
+#   在 Windows 上开发，eol=crlf 看起来"更顺手"，但它会污染仓库。
+#   统一用 LF 是现在的行业共识（Linux 服务器、Docker 容器、CI 环境全是 LF）。
+#   Windows 上的现代编辑器（VS Code / PyCharm）都原生支持 LF，不会显示异常。
+
+# ---------------------------------------------------------------------------
+# 必须强制 LF 的文件类型
+# ---------------------------------------------------------------------------
+# 【为什么这些要单独列出来】
+#   带 shebang 或对换行符敏感的脚本，如果变成 CRLF 会直接运行失败。
+#   典型报错长这样：
+#     /bin/bash^M: bad interpreter: No such file or directory
+#   —— 那个 ^M 就是 CRLF 里的 \r，很多人第一次见到完全不知所以。
+#   这个错误在 Docker 里构建镜像时特别常见（Windows 开发 + Linux 容器）。
+
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.py        text eol=lf
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.ts        text eol=lf
+*.vue       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.sql       text eol=lf
+*.txt       text eol=lf
+*.toml      text eol=lf
+*.ini       text eol=lf
+*.cfg       text eol=lf
+
+# Dockerfile 也要 LF。
+# 【真实案例】Windows 上写的 Dockerfile 如果带 CRLF，
+#   构建时会出现 "exec format error" 或命令莫名失败，
+#   而你盯着 Dockerfile 看半天发现不了问题 —— 因为问题在看不见的 \r 上。
+Dockerfile      text eol=lf
+*.dockerignore  text eol=lf
+
+# ---------------------------------------------------------------------------
+# 二进制文件：禁止 Git 做任何转换
+# ---------------------------------------------------------------------------
+# 【为什么必须声明】
+#   Git 对"看起来像文本"的二进制文件做换行符转换，会直接损坏文件。
+#   比如 Word 文档、图片转换后就打不开了，而且 git 不会给你任何提示。
+
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.webp      binary
+*.xlsx      binary
+*.xls       binary
+*.docx      binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.eot       binary
+
+# SVG 本质是 XML 文本，可以安全地按文本处理，所以它不放在上面的 binary 组里。
+# 【注意】这一行原来我写成了 `*.svg  text eol=lf   # SVG 本质是文本...`，
+# 结果 Git 报 "is not a valid attribute name: #"。
+# 原因：.gitattributes 和 .gitignore 一样，【不支持行尾注释】，
+# 会把 # 及其后面的内容当成属性名去解析。注释只能单独占一行。
+*.svg       text eol=lf
+
+# ---------------------------------------------------------------------------
+# Git diff 的语言识别（提升可读性，可选但有用）
+# ---------------------------------------------------------------------------
+# 【作用】让 git diff / GitHub 网页在展示差异时用正确的语法高亮，
+#   并且让 git log 能统计"这个文件有多少行代码"。
+#   不加也能用，加了体验更好。
+
+*.py        diff=python
+*.js        diff=javascript
+*.mjs       diff=javascript
+*.vue       diff=vue
+*.css       diff=css
+*.html      diff=html
+*.json      diff=json
+*.md        diff=markdown
+*.yml       diff=yaml
+*.yaml      diff=yaml
+*.sql       diff=sql
+
+# ---------------------------------------------------------------------------
+# 已知例外（记录在案，避免以后困惑）
+# ---------------------------------------------------------------------------
+# 本仓库包含 .xlsx（训练计划表）和 .md 里的中文内容。
+# 中文在 UTF-8 下没问题，但如果哪天看到乱码，先确认编辑器用 UTF-8 打开，
+# 而不是去怀疑 Git —— Git 本身不处理编码，只处理字节。
