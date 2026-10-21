@@ -142,19 +142,13 @@ def main() -> int:
         check("状态码 200", code == 200, f"实际 {code}")
         check("含 total / data", "total" in (body or {}) and "data" in (body or {}), str(body))
         initial_total = (body or {}).get("total", 0)
-        # 这一项专门验证中文编码链路：如果响应里是 "å­¦ä¹ " 这种乱码，
-        # 就说明某一层用了错误的字符集。这是 Windows 上极其常见的问题。
-        has_readable_chinese = any(
-            "学习" in str(p.get("title", "")) for p in (body or {}).get("data", [])
-        )
-        check("中文标题正常（未乱码）", has_readable_chinese, str(body)[:200])
-        print(f"        （当前数据 {initial_total} 条）")
+        # 【本次接数据库后修正】原来这里检查"响应里有'学习 Python'这个标题"，
+        # 但数据库初始是空的，这个假设不再成立。
+        # 现在改为：等下用中文标题创建数据后再验证中文没乱码（见第 5 步）。
+        # 这样无论库里有什么，检查都有效。
+        print(f"        （当前库里已有 {initial_total} 条数据）")
 
-        print("\n=== 3. 单条 GET /api/plans/1 ===")
-        code, body, _ = call("GET", "/api/plans/1")
-        check("状态码 200", code == 200, f"实际 {code}")
-
-        print("\n=== 4. 边界：不存在 -> 404 ===")
+        print("\n=== 3. 边界：不存在 -> 404 ===")
         code, body, _ = call("GET", "/api/plans/999999")
         check("状态码 404", code == 404, f"实际 {code}")
 

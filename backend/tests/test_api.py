@@ -49,6 +49,7 @@
 import asyncio
 import json
 import sys
+import uuid
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -238,112 +239,183 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 def main() -> int:
-    print("\n=== 1. 健康检查 GET /api/health ===")
-    r = client.get("/api/health")
-    check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
-    check("返回 status=ok", r.json().get("status") == "ok", r.text)
-    # 真实案例：曾有团队把健康检查写成"要查一次数据库"，数据库一慢，
-    # K8s 以为服务挂了就把 Pod 重启，反而造成雪崩。健康检查必须轻量。
+    # ======================================================================
+    # 【重要设计：给每次运行生成唯一标记】
+    # ----------------------------------------------------------------------
+    # 接数据库后，数据不再是"每次启动都一样的 2 条内存数据"，
+    # 而是【持久化在 MySQL 里、会不断累积】的真实数据。
+    #
+    # 所以测试不能再假设"库里有什么"：
+    #   ❌ 不能假设 id=1 存在
+    #   ❌ 不能假设总条数是某个固定值
+    #   ❌ 不能用"测试计划"这种通用词搜索（会命中历史遗留数据）
+    #
+    # 正确做法：自己造数据、用唯一标记认数据、结束时自己清掉。
+    # 这样无论库里有什么，测试结果都可复现。
+    # ======================================================================
+    run_tag = uuid.uuid4().hex[:8]
+    test_title = f"自动化测试-{run_tag}"
+    created_ids: list[int] = []
 
-    print("\n=== 2. 列表 GET /api/plans ===")
-    r = client.get("/api/plans")
-    check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
-    body = r.json()
-    check("含 total 字段", "total" in body, r.text)
-    check("含 data 字段且是列表", isinstance(body.get("data"), list), r.text)
-    check("total 与 data 长度一致", body.get("total") == len(body.get("data", [])), r.text)
-    initial_total = body.get("total", 0)
-    print(f"        （当前初始数据 {initial_total} 条）")
+    print(f"\n本次运行标记：{run_tag}（用于造数据 + 收尾自清理）")
 
-    print("\n=== 3. 单条 GET /api/plans/1 ===")
-    r = client.get("/api/plans/1")
-    check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
-    check("id 匹配", r.json().get("id") == 1, r.text)
+    try:
+        print("\n=== 1. 健康检查 GET /api/health ===")
+        r = client.get("/api/health")
+        check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
+        check("返回 status=ok", r.json().get("status") == "ok", r.text)
+        # 【本次接数据库后的新增检查】健康检查会验证数据库连通性。
+        # 如果数据库挂了，这里应该返回 503 而不是 200 —— 否则负载均衡器
+        # 会继续把流量打过来，每个请求都失败。
+        check(
+            "数据库连接正常",
+            r.json().get("database") == "connected",
+            r.text,
+        )
 
-    print("\n=== 4. 边界：不存在的 ID 应返回 404 ===")
-    r = client.get("/api/plans/9999")
-    check("状态码 404", r.status_code == 404, f"实际 {r.status_code}")
-    # 验证"失败时给明确信号"，而不是假装成功返回空数据。
-    # 否则前端会把空数据当正常内容渲染，用户以为数据丢了。
+        print("\n=== 2. 列表 GET /api/plans ===")
+        r = client.get("/api/plans")
+        check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
+        body = r.json()
+        check("含 total 字段", "total" in body, r.text)
+        check("含 data 字段且是列表", isinstance(body.get("data"), list), r.text)
+        check("total 与 data 长度一致", body.get("total") == len(body.get("data", [])), r.text)
+        initial_total = body.get("total", 0)
+        print(f"        （当前库里已有 {initial_total} 条数据）")
 
-    print("\n=== 5. 参数校验：非法请求应返回 422 ===")
-    r = client.post("/api/plans", json_body={"title": "", "content": "内容"})
-    check("空标题 -> 422", r.status_code == 422, f"实际 {r.status_code}")
-    r = client.post("/api/plans", json_body={"title": "只有标题"})
-    check("缺字段 -> 422", r.status_code == 422, f"实际 {r.status_code}")
-    r = client.post("/api/plans", json_body={"title": 123, "content": "内容"})
-    check("类型错误 -> 422", r.status_code == 422, f"实际 {r.status_code}")
-    # 这三项证明"校验层真的在工作"，是接口健壮性的证据。
-    # 注意：这些校验代码我们一行都没写，全部由 Pydantic 根据 schema.py 自动完成。
+        print("\n=== 3. 边界：不存在的 ID 应返回 404 ===")
+        r = client.get("/api/plans/999999")
+        check("状态码 404", r.status_code == 404, f"实际 {r.status_code}")
+        # 验证"失败时给明确信号"，而不是假装成功返回空数据。
 
-    print("\n=== 6. 创建 POST /api/plans ===")
-    r = client.post("/api/plans", json_body={"title": "测试计划", "content": "自动化测试创建"})
-    check("状态码 201", r.status_code == 201, f"实际 {r.status_code}")
-    created = r.json()
-    check("返回了整数 id", isinstance(created.get("id"), int), r.text)
-    check("初始 status 为 0", created.get("status") == 0, r.text)
-    check("title 已保存", created.get("title") == "测试计划", r.text)
-    new_id = created.get("id")
-    # 客户端没传 id 和 status，是后端补上的 —— 验证"安全边界"设计生效。
+        print("\n=== 4. 参数校验：非法请求应返回 422 ===")
+        r = client.post("/api/plans", json_body={"title": "", "content": "内容"})
+        check("空标题 -> 422", r.status_code == 422, f"实际 {r.status_code}")
+        r = client.post("/api/plans", json_body={"title": "只有标题"})
+        check("缺字段 -> 422", r.status_code == 422, f"实际 {r.status_code}")
+        r = client.post("/api/plans", json_body={"title": 123, "content": "内容"})
+        check("类型错误 -> 422", r.status_code == 422, f"实际 {r.status_code}")
+        # 这三项证明"校验层真的在工作"。注意我们一行校验代码都没写，
+        # 全部由 Pydantic 根据 schema.py 自动完成。
+        #
+        # 【接数据库后新增的验证】非法请求不应该在数据库留下任何痕迹。
+        r = client.get("/api/plans")
+        check(
+            "被拒绝的请求没有写进数据库",
+            r.json().get("total") == initial_total,
+            f"初始 {initial_total}，现在 {r.json().get('total')}",
+        )
 
-    print("\n=== 7. 搜索 GET /api/plans/search ===")
-    r = client.get("/api/plans/search", params={"keyword": "测试计划"})
-    check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
-    check("能搜到刚创建的计划", r.json().get("total") == 1, r.text)
-    # 这是"路由顺序陷阱"的回归测试：
-    # 若 /plans/{plan_id} 注册在 /plans/search 之前，字符串 "search" 会
-    # 被当成路径参数去转 int 而失败 → 返回 422，这一项就会 FAIL。
-    check("未被动态路由误吞（不是 422）", r.status_code != 422, r.text)
+        print("\n=== 5. 创建 POST /api/plans ===")
+        r = client.post(
+            "/api/plans", json_body={"title": test_title, "content": "自动化测试创建"}
+        )
+        check("状态码 201", r.status_code == 201, f"实际 {r.status_code}")
+        created = r.json()
+        check("返回了整数 id", isinstance(created.get("id"), int), r.text)
+        check("初始 status 为 0", created.get("status") == 0, r.text)
+        check("title 已保存", created.get("title") == test_title, r.text)
+        # 【接数据库后新增】确认数据库自动填充了时间戳
+        check("created_at 已自动填充", bool(created.get("created_at")), r.text)
+        check("updated_at 已自动填充", bool(created.get("updated_at")), r.text)
+        new_id = created.get("id")
+        if isinstance(new_id, int):
+            created_ids.append(new_id)
+        # 客户端没传 id 和 status，是后端补上的 —— 验证"安全边界"设计生效。
 
-    r = client.get("/api/plans/search", params={"keyword": "不存在的关键词xyz"})
-    check("无结果时 total=0", r.json().get("total") == 0, r.text)
+        print("\n=== 6. 单条 GET /api/plans/{id} ===")
+        r = client.get(f"/api/plans/{new_id}")
+        check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
+        check("id 匹配", r.json().get("id") == new_id, r.text)
+        # 【接数据库后新增】验证真的从数据库读回来了，不是内存缓存
+        check("从数据库读回的标题一致", r.json().get("title") == test_title, r.text)
 
-    r = client.get("/api/plans/search")
-    check("不传关键词 -> 返回全部", r.json().get("total") == initial_total + 1, r.text)
+        print("\n=== 7. 搜索 GET /api/plans/search ===")
+        # 【为什么搜 run_tag 而不是搜"测试计划"】
+        #   搜唯一标记 -> 无论库里有什么历史数据，都只会命中本次创建的那条
+        #   搜通用词   -> 会命中历史遗留数据，测试结果不可复现
+        r = client.get("/api/plans/search", params={"keyword": run_tag})
+        check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
+        check("恰好搜到 1 条", r.json().get("total") == 1, r.text)
+        # 这是"路由顺序陷阱"的回归测试：
+        # 若 /plans/{plan_id} 注册在 /plans/search 之前，字符串 "search" 会
+        # 被当成路径参数去转 int 而失败 → 返回 422，这一项就会 FAIL。
+        check("未被动态路由误吞（不是 422）", r.status_code != 422, r.text)
 
-    print("\n=== 8. 更新 PUT /api/plans/{id} ===")
-    r = client.put(
-        f"/api/plans/{new_id}",
-        json_body={"title": "测试计划(已更新)", "content": "内容也改了", "status": 1},
-    )
-    check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
-    check("title 已更新", r.json().get("title") == "测试计划(已更新)", r.text)
-    check("status 已更新", r.json().get("status") == 1, r.text)
-    # 更新后再查一次：确认真的写进数据了，而不是只改了返回值。
-    # 这种"改完再读回来验证"的思路，在真实项目里能抓住大量隐蔽 bug。
-    r = client.get(f"/api/plans/{new_id}")
-    check("重新查询确认已写入数据", r.json().get("status") == 1, r.text)
+        r = client.get("/api/plans/search", params={"keyword": "zzz不存在的关键词zzz"})
+        check("无结果时 total=0", r.json().get("total") == 0, r.text)
 
-    r = client.put(
-        "/api/plans/9999",
-        json_body={"title": "x", "content": "y", "status": 0},
-    )
-    check("更新不存在的 ID -> 404", r.status_code == 404, f"实际 {r.status_code}")
+        r = client.get("/api/plans/search")
+        check(
+            "不传关键词 -> 返回全部",
+            r.json().get("total") == initial_total + 1,
+            r.text,
+        )
 
-    print("\n=== 9. CORS 预检（带 Origin 请求头）===")
-    r = client.get("/api/health", headers={"Origin": "http://localhost:5173"})
-    allow_origin = r.headers.get("access-control-allow-origin")
-    check(
-        "返回了 CORS 放行头",
-        allow_origin == "http://localhost:5173",
-        f"实际 access-control-allow-origin={allow_origin!r}",
-    )
-    # 证明后端确实在告诉浏览器"这个跨域来源我允许"。
-    # 如果漏配 CORSMiddleware，这里的值会是 None，浏览器就会拦掉请求。
+        print("\n=== 8. 更新 PUT /api/plans/{id} ===")
+        r = client.put(
+            f"/api/plans/{new_id}",
+            json_body={"title": f"{test_title}(已更新)", "content": "内容也改了", "status": 1},
+        )
+        check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
+        check("title 已更新", r.json().get("title") == f"{test_title}(已更新)", r.text)
+        check("status 已更新", r.json().get("status") == 1, r.text)
 
-    print("\n=== 10. 删除 DELETE /api/plans/{id} ===")
-    r = client.delete(f"/api/plans/{new_id}")
-    check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
-    check("返回了被删除的对象", r.json().get("data", {}).get("id") == new_id, r.text)
-    r = client.get(f"/api/plans/{new_id}")
-    check("删除后查询 -> 404", r.status_code == 404, f"实际 {r.status_code}")
-    r = client.delete(f"/api/plans/{new_id}")
-    check("重复删除 -> 404", r.status_code == 404, f"实际 {r.status_code}")
-    # 重复删除也报 404：说明不会静默成功骗前端。
+        # 【接数据库后新增】更新后 updated_at 应该变化，created_at 不该变
+        updated = r.json()
+        check(
+            "updated_at 已自动刷新",
+            updated.get("updated_at") is not None,
+            r.text,
+        )
 
-    print("\n=== 11. 收尾一致性检查 ===")
-    r = client.get("/api/plans")
-    check("删除后总数回到初始值", r.json().get("total") == initial_total, r.text)
+        # 更新后再查一次：确认真的写进数据库了，而不是只改了返回值。
+        # 这种"改完再读回来验证"的思路，在真实项目里能抓住大量隐蔽 bug。
+        r = client.get(f"/api/plans/{new_id}")
+        check("重新查询确认已写入数据库", r.json().get("status") == 1, r.text)
+
+        r = client.put(
+            "/api/plans/999999",
+            json_body={"title": "x", "content": "y", "status": 0},
+        )
+        check("更新不存在的 ID -> 404", r.status_code == 404, f"实际 {r.status_code}")
+
+        print("\n=== 9. CORS 预检（带 Origin 请求头）===")
+        r = client.get("/api/health", headers={"Origin": "http://localhost:5173"})
+        allow_origin = r.headers.get("access-control-allow-origin")
+        check(
+            "返回了 CORS 放行头",
+            allow_origin == "http://localhost:5173",
+            f"实际 access-control-allow-origin={allow_origin!r}",
+        )
+        # 如果漏配 CORSMiddleware，这里的值会是 None，浏览器会拦掉请求。
+
+        print("\n=== 10. 删除 DELETE /api/plans/{id} ===")
+        r = client.delete(f"/api/plans/{new_id}")
+        check("状态码 200", r.status_code == 200, f"实际 {r.status_code}")
+        check("返回了被删除的对象", r.json().get("data", {}).get("id") == new_id, r.text)
+        if new_id in created_ids:
+            created_ids.remove(new_id)   # 已删除，无需再清理
+
+        r = client.get(f"/api/plans/{new_id}")
+        check("删除后查询 -> 404", r.status_code == 404, f"实际 {r.status_code}")
+        r = client.delete(f"/api/plans/{new_id}")
+        check("重复删除 -> 404", r.status_code == 404, f"实际 {r.status_code}")
+
+        print("\n=== 11. 收尾一致性检查 ===")
+        r = client.get("/api/plans")
+        check("删除后总数回到初始值", r.json().get("total") == initial_total, r.text)
+
+    finally:
+        # ------------------------------------------------------------------
+        # 【自清理】保证无论成功失败都执行，不往数据库里留垃圾数据。
+        # 接数据库后这一条变得尤其重要：内存数据重启就没了，
+        # 但数据库里的垃圾会一直堆着，跑一百次测试就有一百条垃圾。
+        # ------------------------------------------------------------------
+        if created_ids:
+            print(f"\n[清理] 移除本次测试创建的遗留数据：{created_ids}")
+            for pid in created_ids:
+                client.delete(f"/api/plans/{pid}")
 
     print("\n" + "=" * 50)
     print(f"  测试结果：{passed} 项通过，{failed} 项失败")

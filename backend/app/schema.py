@@ -14,7 +14,9 @@ Schema 层 —— 定义"接口的数据契约"
        前端同事点开就知道每个字段是什么意思，不用来问你
 """
 
-from pydantic import BaseModel, Field
+from datetime import date, datetime
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PlanCreate(BaseModel):
@@ -72,10 +74,50 @@ class PlanUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 【下一步预告（本轮不做，避免扩大范围）】
-# 接口目前"返回"的是裸 dict，没有用 Pydantic 做响应模型。
-# 企业做法是再定义 PlanOut / PlanListOut 并用 response_model= 声明，
-# 好处是：响应字段被严格约束（不会不小心把密码字段吐出去）、
-#        Swagger 里能显示完整的返回结构。
-# 等进入 P1-02 数据库设计、字段变多时一并做，那时收益才明显。
+# 响应模型 —— 接口【返回】给前端的数据格式
 # ---------------------------------------------------------------------------
+# 【为什么要单独定义"返回"的模型，不直接返回数据库对象】
+#   之前接口返回的是裸 dict 或者数据库对象，有两个隐患：
+#
+#   1. 【意外泄露字段】
+#      如果以后 Plan 表加了 password_hash、internal_note 这类字段，
+#      直接把 ORM 对象返回出去，这些字段会【自动】出现在响应里。
+#      用户打开 F12 就能看到内部数据 —— 这是真实发生过的安全事故。
+#      有了显式响应模型，只有这里列出的字段才会被返回，默认安全。
+#
+#   2. 【契约不稳定】
+#      数据库加字段就改接口返回，前端可能因此报错。
+#      有了 PlanOut，数据库怎么变，只要这里不变，前端就无感。
+#
+#   【一句话】响应模型是"接口对外的白名单"。安全上永远用白名单，不用黑名单。
+
+
+class PlanOut(BaseModel):
+    """单条计划的响应格式（GET / POST / PUT 都返回这个）。"""
+
+    # from_attributes=True 是关键：它允许 Pydantic 直接从
+    # SQLAlchemy 模型对象（有 .id / .title 这些属性）构造响应对象，
+    # 而不需要先手动转成 dict。少了这一句会报校验错误。
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="计划编号，由后端生成")
+    title: str = Field(description="计划标题")
+    content: str = Field(description="计划内容")
+    status: int = Field(description="状态：0=未完成，1=已完成")
+
+    # 以下三个是本次接数据库后新增的字段。
+    # 【为什么现在就加到响应里】前端暂时用不到，但加了不破坏兼容性
+    # （前端只读它认识的字段，多出来的会被忽略）。
+    # 而提前返回它们，等前端要展示时不用再改后端。
+    category: str | None = Field(default=None, description="分类，NULL=未分类")
+    due_date: date | None = Field(default=None, description="截止日期，NULL=不限")
+    created_at: datetime = Field(description="创建时间")
+    updated_at: datetime = Field(description="最后更新时间")
+
+
+class PlanListOut(BaseModel):
+    """计划列表的响应格式（GET /api/plans）。"""
+
+    total: int = Field(description="计划总数")
+    data: list[PlanOut] = Field(description="计划列表")
+

@@ -20,6 +20,21 @@ uvicorn>=0.54.0
 # pydantic 是 fastapi 的依赖，会连带装上，但显式写出来更清楚：
 # 我们的 schema.py 直接 import 了它，属于"直接依赖"，不该藏在间接依赖里。
 pydantic>=2.13.0
+
+# ---------- 数据库（阶段 1 新增）----------
+# SQLAlchemy：Python 最主流的 ORM，负责"Python 对象 ↔ 数据库表"的映射
+sqlalchemy>=2.0.0
+
+# PyMySQL：MySQL 的纯 Python 驱动
+# 【为什么不用 mysqlclient】那个需要编译 C 扩展，Windows 上装起来很折腾。
+# PyMySQL 是纯 Python 实现，装起来最省事，小项目性能完全够用。
+pymysql>=1.1.0
+
+# pydantic-settings：从 .env 读配置
+# 【为什么需要它】让数据库密码不写在代码里。
+# 代码要提交到 Git，.env 不提交 —— 这是避免密码泄露的标准做法。
+pydantic-settings>=2.0.0
+
 # ---------------------------------------------------------------------------
 # 【可选】想用 FastAPI 官方的 TestClient 写测试的话，需要它：
 #
